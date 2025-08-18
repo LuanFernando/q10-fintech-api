@@ -42,6 +42,9 @@ class ChatAIQ10Controller extends Controller
             case 'getAllTransaction':
                 $output = $this->getAllTransaction();
                 break;
+            case 'newTransaction':
+                $output = $this->newTransaction((string) $validated['input'], $geminiKey);
+                break;
             default:
                 $output = 'não foi possivel identificar sua intenção.';
                 break;
@@ -60,9 +63,10 @@ class ChatAIQ10Controller extends Controller
     /**
      * @param String $input
      * @param bool $intencao
+     * @param bool $dadosTransacao
      * @return String $prompt
     */
-    public function construirPrompt(String $input, $intencao = false) : String {
+    public function construirPrompt(String $input, $intencao = false, $dadosTransacao = false) : String {
 
         $prompt = "";
 
@@ -82,35 +86,89 @@ class ChatAIQ10Controller extends Controller
                     Exemplo:
                     Mensagem: Retorne todas as transações realizadas
                     Resposta: getAllTransaction
+
+                    Mensagem: Faça um PIX para o João Lima, no valor de R$ 125,98
+                    Resposta: newTransaction
+
+                    Mensagem: Envie R$ 2,09 para a Maria
+                    Resposta: newTransaction
     
                     Lista de intenções disponíveis:
     
                     [
                         getAllAccount,
                         getAllContact,
-                        getAllTransaction
+                        getAllTransaction,
+                        newTransaction
                     ]
     
                     Mensagem recebida: [$input]
             ";
         } else {
-            $prompt = "
-                Assuma o papel de um gestor financeiro da Q10 Fintech.
-                Sua responsabilidade é analisar os dados financeiros do cliente e traduzir essas informações para algo
-                simples e direto, de modo que o cliente compreenda facilmente sua situação financeira.
 
-                Entrada:
+            if($dadosTransacao == true) {
+                $prompt = '
+                    Analise os dados financeiros recebidos.
+                    Sua responsabilidade é verificar se todos os campos necessários para efetuar uma transação estão presentes.
 
-                Dados financeiros do cliente: [$input]
+                    Regras obrigatórias:
 
-                Saída esperada:
+                    Se todos os campos forem encontrados, retorne apenas os dados extraídos em formato JSON válido, seguindo a estrutura abaixo.
 
-                Um resumo claro e objetivo da situação financeira.
+                    Se algum campo estiver ausente ou inconsistente, retorne:
 
-                Linguagem acessível, sem termos técnicos complexos.
+                    { "erro": "Dados insuficientes para efetuar a transação" }
 
-                Se os dados forem insuficientes ou inconsistentes, retorne *Informações financeiras insuficientes para análise.*
-            ";
+                    Estrutura esperada do JSON de saída:
+
+                    {
+                    "valor": 100.99,
+                    "destinatario": "João Lima"
+                    }
+
+                    Campos obrigatórios:
+
+                    valor (número decimal)
+                    destinatario (string, nome completo)
+
+                    Exemplo de mensagem e saida esperada:
+
+                    Mensagem: Envie um Pix para o João Lima, no valor de R$ 23,98
+                    Saida: 
+                        {
+                            "valor": 100.99,
+                            "destinatario": "João Lima"
+                        }
+
+                    Mensagem: Faça um Pix de 23,78 para o Maria Gomes
+                    Saida: 
+                        {
+                            "valor": 23.78,
+                            "destinatario": "Maria Gomes"
+                        }
+
+                    Dados para transação: ['.$input.']
+                ';
+
+            } else {
+                $prompt = "
+                    Assuma o papel de um gestor financeiro da Q10 Fintech.
+                    Sua responsabilidade é analisar os dados financeiros do cliente e traduzir essas informações para algo
+                    simples e direto, de modo que o cliente compreenda facilmente sua situação financeira.
+    
+                    Entrada:
+    
+                    Dados financeiros do cliente: [$input]
+    
+                    Saída esperada:
+    
+                    Um resumo claro e objetivo da situação financeira.
+    
+                    Linguagem acessível, sem termos técnicos complexos.
+    
+                    Se os dados forem insuficientes ou inconsistentes, retorne *Informações financeiras insuficientes para análise.*
+                ";
+            }
         }
 
         return $prompt;
@@ -193,4 +251,70 @@ class ChatAIQ10Controller extends Controller
         return $list;
     }
 
+    /**
+     * @param string $input
+     * @param string $geminiKey
+     * @return array|null $newTransaction
+     * */ 
+    public function newTransaction(String $input, String $geminiKey) {
+
+        $newTransaction = null;
+
+        if(isset($input) && !empty($input)) {
+
+            // Extrai os dados necessarios para fazer a transação.
+            $prompt   = $this->construirPrompt($input, false, true);
+
+            $dadosTransacao = $this->consomeGeminiAI($prompt, $geminiKey);
+
+            // Captura apenas o texto retornado pelo modelo
+            $raw = $dadosTransacao['candidates'][0]['content']['parts'][0]['text'] ?? '';
+
+            // Remove blocos de markdown (```json ... ```)
+            $clean = preg_replace('/```(json)?|```/', '', $raw);
+
+            // Remove espaços em excesso e quebras de linha
+            $clean = trim($clean);
+
+            // Agora decodifica
+            $dadosTransacao = json_decode($clean, true);
+
+            // Seta Account 1 default
+            $account_id = 1;
+
+            // Resgata o contado baseando no nome recebido
+            // Faz a transação e retorna a mensagem para o cliente.
+            $valor        =  ($dadosTransacao['valor'] == 0 ? 0.00 : $dadosTransacao['valor']);
+            $destinatario =  $dadosTransacao['destinatario'];
+
+            if($valor > 0 && !empty($destinatario)) {
+                $valores = [
+                    'valor'          => $valor,
+                    'data_transacao' => (string) date('Y-m-d'),
+                    'hora_transacao' => (string) date('H:i:s'),
+                    'status'         => 'sucesso',
+                    'account_id'     => $account_id
+                ];
+
+                // Seta o novo saldo da conta
+                $account        = Account::findOrFail($account_id);
+                $account->saldo = str_replace(',', '.', (string) ($account->saldo - $valor)); 
+                $account->update();
+
+                // Contato
+                $contact = Contact::where('nome', 'like', '%'.$destinatario.'%')->first();
+                $valores['contact_id'] = $contact->id;
+
+                // Processa a transação
+                $transaction = new Transaction();
+                $transaction->fill($valores);
+                $transaction->save();
+                
+                // Retorna
+                $newTransaction = $transaction; 
+            }
+        }
+
+        return $newTransaction;
+    }
 }

@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use Illuminate\Http\Request;
 use App\Models\Transaction;
+use App\Models\Account;
 
 class TransactionController extends Controller
 {
@@ -32,11 +33,17 @@ class TransactionController extends Controller
                 'contact_id'     => 'required|integer|exists:contacts,id'
             ]);
 
+            // Seta o novo saldo da conta
+            $account        = Account::findOrFail($validated['account_id']);
+            $account->saldo = str_replace(',', '.', (string) ($account->saldo - $validated['valor'])); 
+            $account->update();
+
+            // Processa a transação
             $transaction = new Transaction();
             $transaction->fill($validated);
             $transaction->save();
             
-            return json_encode(array('success' => true, 'data' => $transaction, 'message' => 'trasançãom efetuada com sucesso.'));
+            return json_encode(array('success' => true, 'data' => $transaction, 'message' => 'trasanção efetuada com sucesso.'));
 
         } catch (\Exception $e) {
             return json_encode(array('success' => false, 'message' => 'não foi possivel fazer uma nova transação motivo: '. $e->getMessage()));
